@@ -35,7 +35,7 @@ int main(){
         printf("%s\n", Planner->Dados[i].Titulo);
     }
 
-    GerarHTMLTabela(Planner, "output/TabelaTarefas.html");
+    GerarHTMLTabela(Planner, "planner.html");
 
     DestruirLista(Planner);
 
