@@ -10,7 +10,7 @@ int main() {
     /* selecione a expressão a testar aqui:
        - infixa pode estar sem espaços, será normalizada: "(3+4)*5" ou "( 3 + 4 ) * 5"
        - posfixa deve ter tokens separados por espaço: "3 4 + 5 *" */
-    const char expressao[] = "(3 + 4) * 5";
+    const char expressao[] = "0.5 45 sen 2 ^ +";
 
     printf("Expressao: %s\n", expressao);
 

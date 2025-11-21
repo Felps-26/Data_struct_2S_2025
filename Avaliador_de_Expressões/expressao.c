@@ -35,6 +35,7 @@ static int ehFuncao(const char *token) {
             strcmp(token, "cos") == 0 ||
             strcmp(token, "tg") == 0 ||
             strcmp(token, "log") == 0 ||
+            strcmp(token, "log10") == 0 ||
             strcmp(token, "sqrt") == 0) ? 1 : 0;
 }
 
@@ -58,6 +59,7 @@ static float aplicarFuncao(const char *funcao, float valor) {
     if (strcmp(funcao, "cos") == 0) return cosf(valor * PI / 180.0f);
     if (strcmp(funcao, "tg") == 0) return tanf(valor * PI / 180.0f);
     if (strcmp(funcao, "log") == 0) return log10f(valor);
+    if (strcmp(funcao, "log10") == 0) return log10f(valor);
     if (strcmp(funcao, "sqrt") == 0) return sqrtf(valor);
     return 0.0f;
 }
@@ -70,8 +72,8 @@ static int precedencia(const char *op) {
     return 0;
 }
 
-/* Normaliza entrada infixa: insere espaços entre tokens, mantém sinal unário unido ao número.
-   Ex: "(3+4)*5" -> "( 3 + 4 ) * 5" */
+/* Normaliza entrada infixa: insere espaços entre tokens, mantém nomes de funções unidos.
+   Ex: "(log10(3)+4)*5" -> "( log10 ( 3 ) + 4 ) * 5" */
 static char *normaliza(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s);
@@ -80,9 +82,31 @@ static char *normaliza(const char *s) {
     if (!tmp) return NULL;
     size_t k = 0;
     char last_non_space = '\0';
+    
     for (size_t i = 0; i < n; ++i) {
         char c = s[i];
         if (c == ' ' || c == '\t') continue;
+        
+        /* detecta nome de função (sequência de letras) */
+        if (isalpha((unsigned char)c)) {
+            char word[MAX];
+            int w = 0;
+            while (i < n && isalpha((unsigned char)s[i])) {
+                word[w++] = s[i++];
+            }
+            word[w] = '\0';
+            i--; /* recua pois o loop vai incrementar */
+            
+            /* insere espaço antes da função se necessário */
+            if (k > 0 && tmp[k-1] != ' ') tmp[k++] = ' ';
+            /* copia a palavra (função) */
+            strcpy(tmp + k, word);
+            k += w;
+            tmp[k++] = ' ';
+            last_non_space = 'a'; /* marca como "não operador" */
+            continue;
+        }
+        
         if (c == '-' && i + 1 < n && (isdigit((unsigned char)s[i+1]) || s[i+1] == '.')) {
             /* unary minus if at start or after '(', or after operator */
             if (last_non_space == '\0' || last_non_space == '(' || strchr("+-*/%^", last_non_space)) {
@@ -91,6 +115,7 @@ static char *normaliza(const char *s) {
                 continue;
             }
         }
+        
         if (strchr("+-*/%^()", c)) {
             if (k > 0 && tmp[k-1] != ' ') tmp[k++] = ' ';
             tmp[k++] = c;
@@ -102,6 +127,7 @@ static char *normaliza(const char *s) {
         }
     }
     tmp[k] = '\0';
+    
     /* collapse spaces */
     char *res = malloc(k + 1);
     if (!res) { free(tmp); return NULL; }
@@ -122,26 +148,49 @@ static char *normaliza(const char *s) {
     return res;
 }
 
-/* Detecta se expressão (tokens separados por espaço) está em notação pos-fixa */
+/* Detecta se expressão (tokens separados por espaço) está em notação pos-fixa. */
 static int detectaPosFixa(const char *expr_norm) {
     if (!expr_norm) return 0;
     char *copia = strdup(expr_norm);
     if (!copia) return 0;
     char *token = strtok(copia, " ");
-    int operandos = 0, operadores = 0;
-    while (token) {
-        if (ehNumero(token)) operandos++;
-        else if (ehOperador(token)) operadores++;
-        else if (ehFuncao(token)) { /* função unária não incrementa operadores binários */ }
-        else { operandos = operadores = -9999; break; } /* token inválido => não posfixa */
+    PilhaNum pilha = { .topo = 0 };
+    int valida = 1;
+    
+    while (token && valida) {
+        if (ehNumero(token)) {
+            push(&pilha, strtof(token, NULL));
+        } else if (ehOperador(token)) {
+            if (pilha.topo < 2) {
+                valida = 0;
+                break;
+            }
+            pop(&pilha);
+            pop(&pilha);
+            push(&pilha, 0.0f);
+        } else if (ehFuncao(token)) {
+            if (pilha.topo < 1) {
+                valida = 0;
+                break;
+            }
+            pop(&pilha);
+            push(&pilha, 0.0f);
+        } else if (strcmp(token, "(") == 0 || strcmp(token, ")") == 0) {
+            valida = 0;
+            break;
+        } else {
+            valida = 0;
+            break;
+        }
         token = strtok(NULL, " ");
     }
+    
+    int ehPos = (valida && pilha.topo == 1) ? 1 : 0;
     free(copia);
-    return (operandos == operadores + 1) ? 1 : 0;
+    return ehPos;
 }
 
-/* Converte infixa (tokens separados por espaço) para posfixa.
-   Retorna string alocada com tokens separados por espaço, ou NULL em erro. */
+/* Converte infixa para posfixa */
 static char *infixaParaPosfixa(char *infixa) {
     if (!infixa) return NULL;
     char *copia = strdup(infixa);
@@ -188,63 +237,121 @@ static char *infixaParaPosfixa(char *infixa) {
     return saida;
 }
 
-/* Converte pos-fixa -> infixa (retorna string alocada) ou NULL em erro.
-   Tenta adicionar parênteses quando necessário para preservar a ordem. */
+/* Converte pos-fixa -> infixa */
 char *getFormaInFixa(char *Str) {
     if (!Str || strlen(Str) == 0) return NULL;
     char *copia = strdup(Str);
     if (!copia) return NULL;
-    char *pilha[MAX];
+    
+    typedef struct {
+        char *expr;
+        int prec;
+    } ExprComPrec;
+    
+    ExprComPrec pilha[MAX];
     int topo = 0;
     char *token = strtok(copia, " ");
+    
     while (token) {
         if (ehNumero(token)) {
-            pilha[topo] = strdup(token);
-            if (!pilha[topo]) { while (topo>0) free(pilha[--topo]); free(copia); return NULL; }
+            pilha[topo].expr = strdup(token);
+            if (!pilha[topo].expr) { 
+                while (topo>0) free(pilha[--topo].expr); 
+                free(copia); 
+                return NULL; 
+            }
+            pilha[topo].prec = 999;
             topo++;
         } else if (ehOperador(token)) {
-            if (topo < 2) { while (topo>0) free(pilha[--topo]); free(copia); return NULL; }
-            char *b = pilha[--topo];
-            char *a = pilha[--topo];
-            /* decide parênteses por presença de operadores nos operandos */
-            int needA = strstr(a, "+") || strstr(a, "-") || strstr(a, "*") || strstr(a, "/") || strstr(a, "%") || strstr(a, "^");
-            int needB = strstr(b, "+") || strstr(b, "-") || strstr(b, "*") || strstr(b, "/") || strstr(b, "%") || strstr(b, "^");
-            size_t len = strlen(a) + strlen(b) + 4;
-            char *expr = malloc(len + 4);
-            if (!expr) { free(a); free(b); while (topo>0) free(pilha[--topo]); free(copia); return NULL; }
-            if (needA) {
-                char *sa = malloc(strlen(a) + 3); sprintf(sa, "(%s)", a); free(a); a = sa;
+            if (topo < 2) { 
+                while (topo>0) free(pilha[--topo].expr); 
+                free(copia); 
+                return NULL; 
             }
-            if (needB) {
-                char *sb = malloc(strlen(b) + 3); sprintf(sb, "(%s)", b); free(b); b = sb;
+            
+            ExprComPrec b_item = pilha[--topo];
+            ExprComPrec a_item = pilha[--topo];
+            char *a = a_item.expr;
+            char *b = b_item.expr;
+            int prec_a = a_item.prec;
+            int prec_b = b_item.prec;
+            int prec_op = precedencia(token);
+            
+            if (prec_a < prec_op) {
+                char *sa = malloc(strlen(a) + 3);
+                sprintf(sa, "(%s)", a);
+                free(a);
+                a = sa;
             }
+            
+            if (prec_b < prec_op || 
+                (prec_b == prec_op && (strcmp(token, "-") == 0 || strcmp(token, "/") == 0 || strcmp(token, "%") == 0))) {
+                char *sb = malloc(strlen(b) + 3);
+                sprintf(sb, "(%s)", b);
+                free(b);
+                b = sb;
+            }
+            
+            size_t len = strlen(a) + strlen(b) + 2;
+            char *expr = malloc(len + 1);
+            if (!expr) { 
+                free(a); 
+                free(b); 
+                while (topo>0) free(pilha[--topo].expr); 
+                free(copia); 
+                return NULL; 
+            }
+            
             sprintf(expr, "%s%s%s", a, token, b);
-            free(a); free(b);
-            pilha[topo++] = expr;
+            free(a);
+            free(b);
+            
+            pilha[topo].expr = expr;
+            pilha[topo].prec = prec_op;
+            topo++;
         } else if (ehFuncao(token)) {
-            if (topo < 1) { while (topo>0) free(pilha[--topo]); free(copia); return NULL; }
-            char *a = pilha[--topo];
+            if (topo < 1) { 
+                while (topo>0) free(pilha[--topo].expr); 
+                free(copia); 
+                return NULL; 
+            }
+            
+            ExprComPrec a_item = pilha[--topo];
+            char *a = a_item.expr;
             size_t len = strlen(token) + strlen(a) + 3;
             char *expr = malloc(len + 1);
-            if (!expr) { free(a); while (topo>0) free(pilha[--topo]); free(copia); return NULL; }
+            if (!expr) { 
+                free(a); 
+                while (topo>0) free(pilha[--topo].expr); 
+                free(copia); 
+                return NULL; 
+            }
             sprintf(expr, "%s(%s)", token, a);
             free(a);
-            pilha[topo++] = expr;
+            
+            pilha[topo].expr = expr;
+            pilha[topo].prec = 999;
+            topo++;
         } else {
-            while (topo>0) free(pilha[--topo]);
+            while (topo>0) free(pilha[--topo].expr);
             free(copia);
             return NULL;
         }
         token = strtok(NULL, " ");
     }
+    
     free(copia);
-    if (topo != 1) { while (topo>0) free(pilha[--topo]); return NULL; }
-    char *res = strdup(pilha[0]);
-    free(pilha[0]);
+    if (topo != 1) { 
+        while (topo>0) free(pilha[--topo].expr); 
+        return NULL; 
+    }
+    
+    char *res = strdup(pilha[0].expr);
+    free(pilha[0].expr);
     return res;
 }
 
-/* Avalia pos-fixa (tokens separados por espaço) */
+/* Avalia pos-fixa */
 float getValorPosFixa(char *StrPosFixa) {
     if (!StrPosFixa) return 0.0f;
     PilhaNum pilha = { .topo = 0 };
@@ -275,28 +382,19 @@ float getValorPosFixa(char *StrPosFixa) {
     return (pilha.topo > 0) ? pilha.dados[0] : 0.0f;
 }
 
-/* Função pública para processar uma expressão inteira:
-   - input: string de entrada (infixa ou posfixa)
-   - converted_out: *ponteiro alocado com a conversão (caller deve free)
-   - value_out: valor da expressão (float)
-   - isPosOut: 1 se input era posfixa, 0 se infixa
-   Retorna 0 em sucesso, -1 em erro. */
 int processar_expressao(const char *input, char **converted_out, float *value_out, int *isPosOut) {
     if (!input || !converted_out || !value_out || !isPosOut) return -1;
     *converted_out = NULL;
     *value_out = 0.0f;
     *isPosOut = 0;
 
-    /* primeiro, detecta se ja esta em posfixa ou precisa normalizar (infixa) */
     int ehPosDirect = detectaPosFixa(input);
     
     char *norm = NULL;
     if (!ehPosDirect) {
-        /* infixa -> normaliza */
         norm = normaliza(input);
         if (!norm) return -1;
     } else {
-        /* ja posfixa -> apenas copia */
         norm = strdup(input);
         if (!norm) return -1;
     }
@@ -308,30 +406,26 @@ int processar_expressao(const char *input, char **converted_out, float *value_ou
     char *conv = NULL;
 
     if (ehPos) {
-        /* entrada (normalizada) é posfixa */
-        pos = norm; /* norm é a posfixa */
-        /* converte pos -> infixa */
+        pos = norm;
         conv = getFormaInFixa(pos);
         if (!conv) {
-            /* conversão falhou, mas avalia mesmo assim */
             *value_out = getValorPosFixa(pos);
             *converted_out = NULL;
             free(pos);
             return 0;
         }
         *value_out = getValorPosFixa(pos);
-        *converted_out = conv; /* retorna infixa */
+        *converted_out = conv;
         free(pos);
         return 0;
     } else {
-        /* entrada (normalizada) é infixa */
         pos = infixaParaPosfixa(norm);
         if (!pos) {
             free(norm);
             return -1;
         }
         *value_out = getValorPosFixa(pos);
-        conv = strdup(pos); /* conv será a posfixa retornada */
+        conv = strdup(pos);
         if (!conv) {
             free(pos);
             free(norm);
